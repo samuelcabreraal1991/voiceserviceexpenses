@@ -125,11 +125,14 @@ def asegurar_excel_existente():
 
     ws.row_dimensions[10].height = 24
 
+    # Ajustar ancho de columna E (Descripción) para permitir textos largos
+    ws.column_dimensions["E"].width = 50
+
     start_row = 11
-    total_rows = 35
+    total_rows = 50
     for i in range(total_rows):
         current_row = start_row + i
-        ws.row_dimensions[current_row].height = 20
+        ws.row_dimensions[current_row].height = 22
         ws[f"B{current_row}"] = i + 1
 
         if i == 0:
@@ -141,7 +144,7 @@ def asegurar_excel_existente():
         ws[f"B{current_row}"].alignment = Alignment(horizontal="center", vertical="center")
         ws[f"C{current_row}"].alignment = Alignment(horizontal="center", vertical="center")
         ws[f"D{current_row}"].alignment = Alignment(horizontal="left", vertical="center")
-        ws[f"E{current_row}"].alignment = Alignment(horizontal="left", vertical="center")
+        ws[f"E{current_row}"].alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
         ws[f"F{current_row}"].alignment = Alignment(horizontal="right", vertical="center")
         ws[f"G{current_row}"].alignment = Alignment(horizontal="center", vertical="center")
         ws[f"H{current_row}"].alignment = Alignment(horizontal="right", vertical="center")
@@ -258,7 +261,7 @@ def get_registered_expenses():
     ws = wb["Control de Gastos"]
     
     expenses_list = []
-    for r in range(11, 46):
+    for r in range(11, 60):
         monto = ws[f"F{r}"].value
         if monto is not None and monto != "":
             expenses_list.append({
@@ -279,7 +282,7 @@ def add_expense_to_excel(fecha, categoria, descripcion, monto, metodo_pago):
     ws = wb["Control de Gastos"]
     
     target_row = None
-    for r in range(11, 46):
+    for r in range(11, 60):
         val = ws[f"F{r}"].value
         if val is None or val == "":
             target_row = r
@@ -298,6 +301,15 @@ def add_expense_to_excel(fecha, categoria, descripcion, monto, metodo_pago):
     wb.save(EXCEL_PATH)
     wb.close()
     return True, f"Gasto de ${monto:.2f} registrado con éxito."
+
+def update_initial_budget(nuevo_monto):
+    asegurar_excel_existente()
+    wb = openpyxl.load_workbook(EXCEL_PATH)
+    ws = wb["Control de Gastos"]
+    ws["B6"] = float(nuevo_monto)
+    wb.save(EXCEL_PATH)
+    wb.close()
+    return True
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -318,39 +330,53 @@ HTML_TEMPLATE = """
     }
   </style>
 </head>
-<body class="bg-slate-900 text-slate-100 font-sans antialiased min-h-screen p-4 flex flex-col items-center">
+<body class="bg-slate-900 text-slate-100 font-sans antialiased min-h-screen p-3 flex flex-col items-center">
 
   <div class="w-full max-w-md bg-slate-800 rounded-2xl border border-slate-700 shadow-xl overflow-hidden flex flex-col my-auto">
     
     <div class="bg-indigo-700 p-4 text-center relative flex items-center justify-between">
       <div class="text-left">
         <h1 class="text-lg font-bold text-white flex items-center gap-1.5">
-          <span>🎙️</span> Control de Gastos 24/7
+          <span>🎙️</span> Control de Gastos
         </h1>
-        <p class="text-[10px] text-indigo-200">Servidor en Nube HTTPS</p>
+        <p class="text-[10px] text-indigo-200">Servidor HTTPS 24/7</p>
       </div>
       <a href="/download" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg border border-emerald-400 shadow flex items-center gap-1 transition-all">
         📥 Excel (.xlsx)
       </a>
     </div>
 
-    <div class="grid grid-cols-3 gap-2 p-4 bg-slate-850 border-b border-slate-700">
-      <div class="bg-slate-900 p-2.5 rounded-xl border border-slate-700 text-center">
-        <span class="block text-[10px] text-slate-400 font-bold uppercase">Inicial</span>
-        <span id="kpiInicial" class="text-sm font-extrabold text-blue-400">$0.00</span>
+    <!-- TARJETAS Y CAMBIO DE MONTO INICIAL -->
+    <div class="p-3 bg-slate-850 border-b border-slate-700 space-y-2">
+      <div class="flex items-center justify-between gap-2 bg-slate-900/80 p-2 rounded-xl border border-slate-700">
+        <label class="text-xs text-slate-300 font-semibold flex items-center gap-1">
+          <span>⚙️</span> Monto Inicial ($):
+        </label>
+        <div class="flex gap-1">
+          <input type="number" step="0.01" id="inputInitialBudget" class="w-24 text-sm font-bold bg-slate-800 text-amber-400 border border-slate-700 rounded-lg px-2 py-1 text-right focus:outline-none focus:border-indigo-500">
+          <button onclick="saveInitialBudget()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-2 py-1 rounded-lg transition-colors">Guardar</button>
+        </div>
       </div>
-      <div class="bg-slate-900 p-2.5 rounded-xl border border-slate-700 text-center">
-        <span class="block text-[10px] text-slate-400 font-bold uppercase">Gastado</span>
-        <span id="kpiGastos" class="text-sm font-extrabold text-rose-400">$0.00</span>
-      </div>
-      <div class="bg-slate-900 p-2.5 rounded-xl border border-slate-700 text-center">
-        <span class="block text-[10px] text-slate-400 font-bold uppercase">Disponible</span>
-        <span id="kpiDisponible" class="text-sm font-extrabold text-emerald-400">$0.00</span>
+
+      <div class="grid grid-cols-3 gap-2">
+        <div class="bg-slate-900 p-2 rounded-xl border border-slate-700 text-center">
+          <span class="block text-[9px] text-slate-400 font-bold uppercase">Inicial</span>
+          <span id="kpiInicial" class="text-xs font-extrabold text-blue-400">$0.00</span>
+        </div>
+        <div class="bg-slate-900 p-2 rounded-xl border border-slate-700 text-center">
+          <span class="block text-[9px] text-slate-400 font-bold uppercase">Gastado</span>
+          <span id="kpiGastos" class="text-xs font-extrabold text-rose-400">$0.00</span>
+        </div>
+        <div class="bg-slate-900 p-2 rounded-xl border border-slate-700 text-center">
+          <span class="block text-[9px] text-slate-400 font-bold uppercase">Disponible</span>
+          <span id="kpiDisponible" class="text-xs font-extrabold text-emerald-400">$0.00</span>
+        </div>
       </div>
     </div>
 
+    <!-- BOTÓN MICRÓFONO -->
     <div class="p-4 flex flex-col items-center justify-center text-center">
-      <p class="text-xs text-slate-400 mb-2">Toca el botón y di tu gasto:<br><span class="italic text-indigo-300">"Gasté 250 pesos en supermercado"</span></p>
+      <p class="text-xs text-slate-400 mb-2">Toca el micrófono y di tu gasto libremente:<br><span class="italic text-indigo-300">"Gasté 250 pesos en supermercado comprando fruta y carne"</span></p>
 
       <button id="btnVoice" onclick="toggleVoice()" class="w-16 h-16 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center text-2xl shadow-lg transition-all transform active:scale-95">
         <span id="micIcon">🎙️</span>
@@ -359,10 +385,11 @@ HTML_TEMPLATE = """
       <div id="statusText" class="mt-2 text-xs font-semibold text-slate-300">Toca para dictar por voz</div>
     </div>
 
+    <!-- FORMULARIO DE ENTRAMADO -->
     <div class="p-4 bg-slate-900/60 border-t border-slate-700 space-y-3">
       <div>
         <label class="block text-[11px] text-slate-400 font-semibold mb-1">🗣️ Texto Dictado o Reconocido:</label>
-        <input type="text" id="rawText" class="w-full text-xs bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-indigo-500" placeholder="Escribe o dicta aquí..." oninput="processManualInput()">
+        <input type="text" id="rawText" class="w-full text-xs bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-indigo-500" placeholder="Escribe o dicta aquí sin límite de longitud..." oninput="processManualInput()">
       </div>
 
       <div class="grid grid-cols-2 gap-2">
@@ -385,11 +412,13 @@ HTML_TEMPLATE = """
         </div>
       </div>
 
+      <!-- DESCRIPCIÓN AMPLIADA (TEXTAREA / INPUT LARGO) -->
+      <div>
+        <label class="block text-[11px] text-slate-400 font-semibold mb-1">Descripción / Concepto (Detallado):</label>
+        <textarea id="valDesc" rows="2" class="w-full text-xs bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-indigo-500 resize-none" placeholder="Descripción extendida del gasto..."></textarea>
+      </div>
+
       <div class="grid grid-cols-2 gap-2">
-        <div>
-          <label class="block text-[11px] text-slate-400">Descripción:</label>
-          <input type="text" id="valDesc" class="w-full text-xs bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 focus:outline-none">
-        </div>
         <div>
           <label class="block text-[11px] text-slate-400">Método Pago:</label>
           <select id="valMetodo" class="w-full text-xs bg-slate-800 border border-slate-700 rounded-lg px-2 py-2 text-slate-200 focus:outline-none">
@@ -399,11 +428,12 @@ HTML_TEMPLATE = """
             <option value="Transferencia">Transferencia</option>
           </select>
         </div>
+        <div class="flex items-end">
+          <button onclick="saveExpense()" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 rounded-xl text-xs shadow transition-colors">
+            ✅ Guardar Gasto
+          </button>
+        </div>
       </div>
-
-      <button onclick="saveExpense()" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2.5 rounded-xl text-xs shadow transition-colors">
-        ✅ Guardar Gasto
-      </button>
 
       <!-- TABLA DE HISTORIAL DE GASTOS -->
       <div class="pt-2">
@@ -411,7 +441,7 @@ HTML_TEMPLATE = """
           <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300">📋 Gastos Registrados en Excel</h3>
           <a href="/download" class="text-[10px] text-indigo-400 hover:underline">Descargar Archivo</a>
         </div>
-        <div class="overflow-x-auto max-h-36 border border-slate-700 rounded-lg">
+        <div class="overflow-x-auto max-h-40 border border-slate-700 rounded-lg">
           <table class="w-full text-xs text-left text-slate-300">
             <thead class="bg-slate-800 uppercase text-[9px] text-slate-400 sticky top-0">
               <tr>
@@ -507,6 +537,7 @@ HTML_TEMPLATE = """
       // KPIs
       const respKpi = await fetch('/api/summary');
       const dataKpi = await respKpi.json();
+      document.getElementById('inputInitialBudget').value = dataKpi.monto_inicial;
       document.getElementById('kpiInicial').textContent = fmt(dataKpi.monto_inicial);
       document.getElementById('kpiGastos').textContent = fmt(dataKpi.total_gastos);
       document.getElementById('kpiDisponible').textContent = fmt(dataKpi.saldo_disponible);
@@ -528,11 +559,29 @@ HTML_TEMPLATE = """
         tr.innerHTML = `
           <td class="px-2 py-1.5 text-[10px] text-slate-400">${item.fecha}</td>
           <td class="px-2 py-1.5 text-slate-200 font-medium">${item.categoria}</td>
-          <td class="px-2 py-1.5 text-slate-400">${item.descripcion}</td>
+          <td class="px-2 py-1.5 text-slate-400 whitespace-normal break-words max-w-[140px]">${item.descripcion}</td>
           <td class="px-2 py-1.5 text-right text-rose-400 font-bold">${fmt(item.monto)}</td>
         `;
         tbody.appendChild(tr);
       });
+    }
+
+    async function saveInitialBudget() {
+      const monto = parseFloat(document.getElementById('inputInitialBudget').value);
+      if (isNaN(monto) || monto < 0) {
+        showToast('Ingresa un monto inicial válido.', 'error');
+        return;
+      }
+      const resp = await fetch('/api/set_initial_budget', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({monto_inicial: monto})
+      });
+      const data = await resp.json();
+      if (data.success) {
+        showToast('⚙️ ' + data.message, 'success');
+        loadData();
+      }
     }
 
     async function saveExpense() {
@@ -614,6 +663,13 @@ def add_expense():
     
     success, msg = add_expense_to_excel(fecha, categoria, descripcion, monto, metodo_pago)
     return jsonify({"success": success, "message": msg})
+
+@app.route("/api/set_initial_budget", methods=["POST"])
+def set_initial_budget():
+    data = request.get_json() or {}
+    monto_inicial = data.get("monto_inicial", 5000)
+    update_initial_budget(monto_inicial)
+    return jsonify({"success": True, "message": f"Monto inicial modificado a ${float(monto_inicial):.2f}"})
 
 @app.route("/download")
 def download():
