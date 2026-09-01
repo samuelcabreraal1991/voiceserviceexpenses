@@ -255,6 +255,21 @@ def parse_voice_text(text):
     }
 
 def get_excel_summary():
+    google_url = get_google_webhook_url()
+    if google_url:
+        try:
+            res = requests.get(google_url, timeout=4)
+            if res.status_code == 200:
+                data = res.json()
+                if "monto_inicial" in data:
+                    return {
+                        "monto_inicial": float(data.get("monto_inicial", 0)),
+                        "total_gastos": float(data.get("total_gastos", 0)),
+                        "saldo_disponible": float(data.get("saldo_disponible", 0))
+                    }
+        except Exception:
+            pass
+
     asegurar_excel_existente()
     wb = openpyxl.load_workbook(EXCEL_PATH, data_only=True)
     ws = wb["Control de Gastos"]
@@ -271,6 +286,17 @@ def get_excel_summary():
     }
 
 def get_registered_expenses():
+    google_url = get_google_webhook_url()
+    if google_url:
+        try:
+            res = requests.get(google_url, timeout=4)
+            if res.status_code == 200:
+                data = res.json()
+                if "expenses" in data and isinstance(data["expenses"], list):
+                    return data["expenses"]
+        except Exception:
+            pass
+
     asegurar_excel_existente()
     wb = openpyxl.load_workbook(EXCEL_PATH, data_only=True)
     ws = wb["Control de Gastos"]
@@ -286,7 +312,7 @@ def get_registered_expenses():
                 "descripcion": ws[f"E{r}"].value or "Gasto",
                 "monto": float(monto),
                 "metodo_pago": ws[f"G{r}"].value or "Efectivo",
-                "saldo_restante": float(ws[f"H{r}"].value or 0) if ws[f"H{r}"].value not in [None, ""] else None
+                "row_index": r
             })
     wb.close()
     return expenses_list
@@ -316,7 +342,6 @@ def add_expense_to_excel(fecha, categoria, descripcion, monto, metodo_pago):
     wb.save(EXCEL_PATH)
     wb.close()
 
-    # Sincronización en segundo plano con Google Sheets si existe Webhook configurado
     google_url = get_google_webhook_url()
     if google_url:
         try:
@@ -327,11 +352,60 @@ def add_expense_to_excel(fecha, categoria, descripcion, monto, metodo_pago):
                 "descripcion": descripcion,
                 "monto": float(monto),
                 "metodo_pago": metodo_pago
-            }, timeout=3)
+            }, timeout=4)
         except Exception:
             pass
 
     return True, f"Gasto de ${monto:.2f} registrado con éxito."
+
+def delete_expense_from_excel(row_index, monto, descripcion):
+    asegurar_excel_existente()
+    wb = openpyxl.load_workbook(EXCEL_PATH)
+    ws = wb["Control de Gastos"]
+    
+    # Encontrar la fila a eliminar
+    deleted = False
+    target = int(row_index) if row_index and str(row_index).isdigit() else None
+    
+    if target and target >= 11 and target < 60:
+        # Limpiar celdas de esa fila
+        ws[f"C{target}"] = None
+        ws[f"D{target}"] = None
+        ws[f"E{target}"] = None
+        ws[f"F{target}"] = None
+        ws[f"G{target}"] = None
+        deleted = True
+    else:
+        # Buscar por monto y descripcion
+        for r in range(11, 60):
+            m = ws[f"F{r}"].value
+            d = ws[f"E{r}"].value
+            if m is not None and abs(float(m) - float(monto)) < 0.01 and (not descripcion or d == descripcion):
+                ws[f"C{r}"] = None
+                ws[f"D{r}"] = None
+                ws[f"E{r}"] = None
+                ws[f"F{r}"] = None
+                ws[f"G{r}"] = None
+                target = r
+                deleted = True
+                break
+
+    wb.save(EXCEL_PATH)
+    wb.close()
+
+    google_url = get_google_webhook_url()
+    if google_url:
+        try:
+            requests.post(google_url, json={
+                "action": "delete_expense",
+                "row_index": target,
+                "monto": float(monto),
+                "descripcion": descripcion
+            }, timeout=4)
+        except Exception:
+            pass
+
+    return deleted
 
 def update_initial_budget(nuevo_monto):
     asegurar_excel_existente()
@@ -347,7 +421,7 @@ def update_initial_budget(nuevo_monto):
             requests.post(google_url, json={
                 "action": "update_budget",
                 "monto_inicial": float(nuevo_monto)
-            }, timeout=3)
+            }, timeout=4)
         except Exception:
             pass
 
@@ -396,7 +470,7 @@ HTML_TEMPLATE = """
           <span class="group-open:rotate-180 transition-transform">▼</span>
         </summary>
         <div class="mt-2 space-y-2 text-xs">
-          <p class="text-[10px] text-slate-400">Pega aquí la URL de tu Google Apps Script de tu Google Sheet para respaldar tus gastos 100% permanente en Google Drive:</p>
+          <p class="text-[10px] text-slate-400">Pega aquí la URL de tu Google Apps Script de tu Google Sheet para ver y modificar tus datos en tiempo real:</p>
           <div class="flex gap-1">
             <input type="text" id="googleUrlInput" class="flex-1 text-[11px] bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-200 focus:outline-none" placeholder="https://script.google.com/macros/s/.../exec">
             <button onclick="saveGoogleUrl()" class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-2 py-1 rounded text-xs">Vincular</button>
@@ -490,13 +564,15 @@ HTML_TEMPLATE = """
         </div>
       </div>
 
-      <!-- TABLA DE HISTORIAL DE GASTOS -->
+      <!-- TABLA DE HISTORIAL DE GASTOS CON BOTÓN ELIMINAR -->
       <div class="pt-2">
         <div class="flex items-center justify-between mb-2">
-          <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300">📋 Gastos Registrados en Excel</h3>
-          <a href="/download" class="text-[10px] text-indigo-400 hover:underline">Descargar Archivo</a>
+          <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300">📋 Gastos Registrados (Sincronizado)</h3>
+          <button onclick="loadData()" class="text-[10px] text-indigo-400 hover:underline flex items-center gap-0.5">
+            🔄 Sincronizar
+          </button>
         </div>
-        <div class="overflow-x-auto max-h-40 border border-slate-700 rounded-lg">
+        <div class="overflow-x-auto max-h-48 border border-slate-700 rounded-lg">
           <table class="w-full text-xs text-left text-slate-300">
             <thead class="bg-slate-800 uppercase text-[9px] text-slate-400 sticky top-0">
               <tr>
@@ -504,10 +580,11 @@ HTML_TEMPLATE = """
                 <th class="px-2 py-1">Cat.</th>
                 <th class="px-2 py-1">Concepto</th>
                 <th class="px-2 py-1 text-right">Monto</th>
+                <th class="px-1 py-1 text-center">Acción</th>
               </tr>
             </thead>
             <tbody id="historyBody" class="divide-y divide-slate-700/50">
-              <tr><td colspan="4" class="px-2 py-2 text-center text-slate-500">Cargando gastos...</td></tr>
+              <tr><td colspan="5" class="px-2 py-2 text-center text-slate-500">Cargando datos...</td></tr>
             </tbody>
           </table>
         </div>
@@ -608,22 +685,44 @@ HTML_TEMPLATE = """
       const tbody = document.getElementById('historyBody');
       tbody.innerHTML = '';
 
-      if (expenses.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="4" class="px-2 py-2 text-center text-slate-500">No hay gastos registrados aún.</td></tr>';
+      if (!expenses || expenses.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="px-2 py-2 text-center text-slate-500">No hay gastos registrados aún.</td></tr>';
         return;
       }
 
-      expenses.forEach((item) => {
+      expenses.forEach((item, idx) => {
         const tr = document.createElement('tr');
         tr.className = 'border-b border-slate-700/40';
         tr.innerHTML = `
           <td class="px-2 py-1.5 text-[10px] text-slate-400">${item.fecha}</td>
           <td class="px-2 py-1.5 text-slate-200 font-medium">${item.categoria}</td>
-          <td class="px-2 py-1.5 text-slate-400 whitespace-normal break-words max-w-[140px]">${item.descripcion}</td>
+          <td class="px-2 py-1.5 text-slate-400 whitespace-normal break-words max-w-[120px]">${item.descripcion}</td>
           <td class="px-2 py-1.5 text-right text-rose-400 font-bold">${fmt(item.monto)}</td>
+          <td class="px-1 py-1.5 text-center">
+            <button onclick="deleteExpense(${item.row_index || item.rowIndex || (idx + 11)}, ${item.monto}, '${item.descripcion.replace(/'/g, "\\'")}')" class="bg-rose-900/60 hover:bg-rose-600 text-rose-200 hover:text-white px-2 py-0.5 rounded font-bold text-[10px] transition-colors" title="Eliminar registro">
+              🗑️
+            </button>
+          </td>
         `;
         tbody.appendChild(tr);
       });
+    }
+
+    async function deleteExpense(rowIndex, monto, descripcion) {
+      if (!confirm(`¿Deseas eliminar este gasto de ${fmt(monto)}?`)) return;
+
+      const resp = await fetch('/api/delete_expense', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({row_index: rowIndex, monto: monto, descripcion: descripcion})
+      });
+      const data = await resp.json();
+      if (data.success) {
+        showToast('🗑️ Registro eliminado correctamente', 'success');
+        loadData();
+      } else {
+        showToast('❌ No se pudo eliminar el registro', 'error');
+      }
     }
 
     async function saveGoogleUrl() {
@@ -637,6 +736,7 @@ HTML_TEMPLATE = """
       if (data.success) {
         showToast('🟢 Google Sheets vinculado con éxito', 'success');
         document.getElementById('syncStatus').textContent = '🟢 Google Sheets Vinculado';
+        loadData();
       }
     }
 
@@ -737,6 +837,16 @@ def add_expense():
     
     success, msg = add_expense_to_excel(fecha, categoria, descripcion, monto, metodo_pago)
     return jsonify({"success": success, "message": msg})
+
+@app.route("/api/delete_expense", methods=["POST"])
+def delete_expense():
+    data = request.get_json() or {}
+    row_index = data.get("row_index")
+    monto = data.get("monto", 0)
+    descripcion = data.get("descripcion", "")
+    
+    success = delete_expense_from_excel(row_index, monto, descripcion)
+    return jsonify({"success": success})
 
 @app.route("/api/set_initial_budget", methods=["POST"])
 def set_initial_budget():
