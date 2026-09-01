@@ -1,12 +1,29 @@
 import os
 import re
+import json
 from datetime import datetime
 from flask import Flask, render_template_string, request, jsonify, send_file
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+import requests
 
 app = Flask(__name__)
 EXCEL_PATH = os.path.join(os.path.dirname(__file__), "Control_de_Gastos.xlsx")
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+
+def get_google_webhook_url():
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("google_webhook_url", "")
+        except Exception:
+            return ""
+    return ""
+
+def set_google_webhook_url(url):
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump({"google_webhook_url": url}, f)
 
 # -------------------------------------------------------------
 # GENERADOR AUTOMÁTICO DE EXCEL EN LA NUBE SI NO EXISTE
@@ -124,8 +141,6 @@ def asegurar_excel_existente():
         cell.border = DEFAULT_BORDER
 
     ws.row_dimensions[10].height = 24
-
-    # Ajustar ancho de columna E (Descripción) para permitir textos largos
     ws.column_dimensions["E"].width = 50
 
     start_row = 11
@@ -300,6 +315,22 @@ def add_expense_to_excel(fecha, categoria, descripcion, monto, metodo_pago):
 
     wb.save(EXCEL_PATH)
     wb.close()
+
+    # Sincronización en segundo plano con Google Sheets si existe Webhook configurado
+    google_url = get_google_webhook_url()
+    if google_url:
+        try:
+            requests.post(google_url, json={
+                "action": "add_expense",
+                "fecha": fecha,
+                "categoria": categoria,
+                "descripcion": descripcion,
+                "monto": float(monto),
+                "metodo_pago": metodo_pago
+            }, timeout=3)
+        except Exception:
+            pass
+
     return True, f"Gasto de ${monto:.2f} registrado con éxito."
 
 def update_initial_budget(nuevo_monto):
@@ -309,6 +340,17 @@ def update_initial_budget(nuevo_monto):
     ws["B6"] = float(nuevo_monto)
     wb.save(EXCEL_PATH)
     wb.close()
+
+    google_url = get_google_webhook_url()
+    if google_url:
+        try:
+            requests.post(google_url, json={
+                "action": "update_budget",
+                "monto_inicial": float(nuevo_monto)
+            }, timeout=3)
+        except Exception:
+            pass
+
     return True
 
 HTML_TEMPLATE = """
@@ -317,7 +359,7 @@ HTML_TEMPLATE = """
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Control de Gastos por Voz 24/7</title>
+  <title>Control de Gastos por Voz + Google Sheets</title>
   <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
   <style>
     .pulse-ring {
@@ -337,18 +379,32 @@ HTML_TEMPLATE = """
     <div class="bg-indigo-700 p-4 text-center relative flex items-center justify-between">
       <div class="text-left">
         <h1 class="text-lg font-bold text-white flex items-center gap-1.5">
-          <span>🎙️</span> Control de Gastos
+          <span>🎙️</span> Control de Gastos 24/7
         </h1>
-        <p class="text-[10px] text-indigo-200">Servidor HTTPS 24/7</p>
+        <p id="syncStatus" class="text-[10px] text-indigo-200">🟢 Conexión Lista</p>
       </div>
       <a href="/download" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg border border-emerald-400 shadow flex items-center gap-1 transition-all">
         📥 Excel (.xlsx)
       </a>
     </div>
 
-    <!-- TARJETAS Y CAMBIO DE MONTO INICIAL -->
-    <div class="p-3 bg-slate-850 border-b border-slate-700 space-y-2">
-      <div class="flex items-center justify-between gap-2 bg-slate-900/80 p-2 rounded-xl border border-slate-700">
+    <!-- INTEGRACIÓN GOOGLE SHEETS -->
+    <div class="p-3 bg-slate-900/90 border-b border-slate-700 space-y-2">
+      <details class="group">
+        <summary class="text-xs font-bold text-indigo-300 cursor-pointer flex items-center justify-between">
+          <span>📊 Sincronizar con Google Sheets (Opcional)</span>
+          <span class="group-open:rotate-180 transition-transform">▼</span>
+        </summary>
+        <div class="mt-2 space-y-2 text-xs">
+          <p class="text-[10px] text-slate-400">Pega aquí la URL de tu Google Apps Script de tu Google Sheet para respaldar tus gastos 100% permanente en Google Drive:</p>
+          <div class="flex gap-1">
+            <input type="text" id="googleUrlInput" class="flex-1 text-[11px] bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-200 focus:outline-none" placeholder="https://script.google.com/macros/s/.../exec">
+            <button onclick="saveGoogleUrl()" class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-2 py-1 rounded text-xs">Vincular</button>
+          </div>
+        </div>
+      </details>
+
+      <div class="flex items-center justify-between gap-2 bg-slate-900 p-2 rounded-xl border border-slate-700">
         <label class="text-xs text-slate-300 font-semibold flex items-center gap-1">
           <span>⚙️</span> Monto Inicial ($):
         </label>
@@ -385,7 +441,7 @@ HTML_TEMPLATE = """
       <div id="statusText" class="mt-2 text-xs font-semibold text-slate-300">Toca para dictar por voz</div>
     </div>
 
-    <!-- FORMULARIO DE ENTRAMADO -->
+    <!-- FORMULARIO DE ENTRADA -->
     <div class="p-4 bg-slate-900/60 border-t border-slate-700 space-y-3">
       <div>
         <label class="block text-[11px] text-slate-400 font-semibold mb-1">🗣️ Texto Dictado o Reconocido:</label>
@@ -412,7 +468,6 @@ HTML_TEMPLATE = """
         </div>
       </div>
 
-      <!-- DESCRIPCIÓN AMPLIADA (TEXTAREA / INPUT LARGO) -->
       <div>
         <label class="block text-[11px] text-slate-400 font-semibold mb-1">Descripción / Concepto (Detallado):</label>
         <textarea id="valDesc" rows="2" class="w-full text-xs bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-indigo-500 resize-none" placeholder="Descripción extendida del gasto..."></textarea>
@@ -534,7 +589,6 @@ HTML_TEMPLATE = """
     function fmt(n) { return '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}); }
 
     async function loadData() {
-      // KPIs
       const respKpi = await fetch('/api/summary');
       const dataKpi = await respKpi.json();
       document.getElementById('inputInitialBudget').value = dataKpi.monto_inicial;
@@ -542,7 +596,13 @@ HTML_TEMPLATE = """
       document.getElementById('kpiGastos').textContent = fmt(dataKpi.total_gastos);
       document.getElementById('kpiDisponible').textContent = fmt(dataKpi.saldo_disponible);
 
-      // Tabla Historial
+      const respGoogle = await fetch('/api/get_google_config');
+      const dataGoogle = await respGoogle.json();
+      if (dataGoogle.url) {
+        document.getElementById('googleUrlInput').value = dataGoogle.url;
+        document.getElementById('syncStatus').textContent = '🟢 Google Sheets Vinculado';
+      }
+
       const respHistory = await fetch('/api/expenses');
       const expenses = await respHistory.json();
       const tbody = document.getElementById('historyBody');
@@ -564,6 +624,20 @@ HTML_TEMPLATE = """
         `;
         tbody.appendChild(tr);
       });
+    }
+
+    async function saveGoogleUrl() {
+      const url = document.getElementById('googleUrlInput').value.trim();
+      const resp = await fetch('/api/set_google_config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({url: url})
+      });
+      const data = await resp.json();
+      if (data.success) {
+        showToast('🟢 Google Sheets vinculado con éxito', 'success');
+        document.getElementById('syncStatus').textContent = '🟢 Google Sheets Vinculado';
+      }
     }
 
     async function saveInitialBudget() {
@@ -670,6 +744,17 @@ def set_initial_budget():
     monto_inicial = data.get("monto_inicial", 5000)
     update_initial_budget(monto_inicial)
     return jsonify({"success": True, "message": f"Monto inicial modificado a ${float(monto_inicial):.2f}"})
+
+@app.route("/api/get_google_config", methods=["GET"])
+def get_google_config():
+    return jsonify({"url": get_google_webhook_url()})
+
+@app.route("/api/set_google_config", methods=["POST"])
+def set_google_config():
+    data = request.get_json() or {}
+    url = data.get("url", "").strip()
+    set_google_webhook_url(url)
+    return jsonify({"success": True, "url": url})
 
 @app.route("/download")
 def download():
