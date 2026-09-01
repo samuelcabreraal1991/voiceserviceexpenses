@@ -268,7 +268,7 @@ def sync_from_google_sheets():
             try:
                 data = res.json()
             except Exception:
-                return False, "Google devolvió una página de acceso o error HTML. Asegúrate de publicar el Apps Script con Acceso: 'Cualquier persona' (Anyone) y desplegar una NUEVA VERSIÓN.", None, None, None, []
+                return False, "Google devolvió una respuesta no válida. Asegúrate de haber publicado una NUEVA VERSIÓN en Apps Script.", None, None, None, []
 
             monto_inicial = float(data.get("monto_inicial", 5000))
             total_gastos = float(data.get("total_gastos", 0))
@@ -432,10 +432,11 @@ def delete_expense_from_excel(row_index, monto, descripcion):
     return deleted
 
 def update_initial_budget(nuevo_monto):
+    m = float(nuevo_monto)
     asegurar_excel_existente()
     wb = openpyxl.load_workbook(EXCEL_PATH)
     ws = wb["Control de Gastos"]
-    ws["B6"] = float(nuevo_monto)
+    ws["B6"] = m
     wb.save(EXCEL_PATH)
     wb.close()
 
@@ -444,7 +445,7 @@ def update_initial_budget(nuevo_monto):
         try:
             requests.post(google_url, json={
                 "action": "update_budget",
-                "monto_inicial": float(nuevo_monto)
+                "monto_inicial": m
             }, timeout=5)
         except Exception:
             pass
@@ -655,6 +656,7 @@ HTML_TEMPLATE = """
     function resetMicUI() {
       isListening = false;
       document.getElementById('btnVoice').classList.remove('bg-rose-600', 'pulse-ring');
+      document.getElementById('btnVoice').classList.add('bg-indigo-600');
       document.getElementById('micIcon').textContent = '🎙️';
       document.getElementById('statusText').textContent = 'Toca para dictar por voz';
     }
@@ -688,6 +690,11 @@ HTML_TEMPLATE = """
 
     function fmt(n) { return '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}); }
 
+    function parseMoney(str) {
+      if (!str) return 0;
+      return parseFloat(String(str).replace(/[^0-9.-]+/g, "")) || 0;
+    }
+
     async function triggerSync() {
       showToast('🔄 Sincronizando con Google Sheets...', 'info');
       const resp = await fetch('/api/sync_google');
@@ -707,6 +714,7 @@ HTML_TEMPLATE = """
       document.getElementById('kpiInicial').textContent = fmt(dataKpi.monto_inicial);
       document.getElementById('kpiGastos').textContent = fmt(dataKpi.total_gastos);
       document.getElementById('kpiDisponible').textContent = fmt(dataKpi.saldo_disponible);
+      document.getElementById('kpiDisponible').className = dataKpi.saldo_disponible < 0 ? 'text-xs font-extrabold text-rose-500' : 'text-xs font-extrabold text-emerald-400';
 
       const respGoogle = await fetch('/api/get_google_config');
       const dataGoogle = await respGoogle.json();
@@ -781,6 +789,14 @@ HTML_TEMPLATE = """
         showToast('Ingresa un monto inicial válido.', 'error');
         return;
       }
+
+      // Recálculo visual instantáneo en pantalla
+      document.getElementById('kpiInicial').textContent = fmt(monto);
+      const totalGastos = parseMoney(document.getElementById('kpiGastos').textContent);
+      const nuevoDisp = monto - totalGastos;
+      document.getElementById('kpiDisponible').textContent = fmt(nuevoDisp);
+      document.getElementById('kpiDisponible').className = nuevoDisp < 0 ? 'text-xs font-extrabold text-rose-500' : 'text-xs font-extrabold text-emerald-400';
+
       const resp = await fetch('/api/set_initial_budget', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -789,7 +805,7 @@ HTML_TEMPLATE = """
       const data = await resp.json();
       if (data.success) {
         showToast('⚙️ ' + data.message, 'success');
-        loadData();
+        setTimeout(loadData, 500);
       }
     }
 
