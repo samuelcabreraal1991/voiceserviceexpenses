@@ -254,53 +254,77 @@ def parse_voice_text(text):
         "raw_text": text
     }
 
-def get_excel_summary():
+def sync_from_google_sheets():
     google_url = get_google_webhook_url()
-    if google_url:
-        try:
-            res = requests.get(google_url, timeout=4)
-            if res.status_code == 200:
-                data = res.json()
-                if "monto_inicial" in data:
-                    return {
-                        "monto_inicial": float(data.get("monto_inicial", 0)),
-                        "total_gastos": float(data.get("total_gastos", 0)),
-                        "saldo_disponible": float(data.get("saldo_disponible", 0))
-                    }
-        except Exception:
-            pass
+    if not google_url:
+        return False, "No hay Google Sheets vinculado.", None, None, None, []
+
+    try:
+        res = requests.get(google_url, timeout=5)
+        if res.status_code == 200:
+            data = res.json()
+            monto_inicial = float(data.get("monto_inicial", 5000))
+            total_gastos = float(data.get("total_gastos", 0))
+            saldo_disponible = float(data.get("saldo_disponible", monto_inicial - total_gastos))
+            expenses = data.get("expenses", [])
+
+            # Sincronizar archivo Excel local con la data real traída de Google Sheets
+            asegurar_excel_existente()
+            wb = openpyxl.load_workbook(EXCEL_PATH)
+            ws = wb["Control de Gastos"]
+            ws["B6"] = monto_inicial
+
+            # Limpiar filas anteriores
+            for r in range(11, 60):
+                ws[f"C{r}"] = None
+                ws[f"D{r}"] = None
+                ws[f"E{r}"] = None
+                ws[f"F{r}"] = None
+                ws[f"G{r}"] = None
+
+            # Re-poblar filas traídas de Google Sheets
+            for idx, item in enumerate(expenses):
+                r = 11 + idx
+                if r < 60:
+                    ws[f"B{r}"] = idx + 1
+                    ws[f"C{r}"] = item.get("fecha", "")
+                    ws[f"D{r}"] = item.get("categoria", "Otros")
+                    ws[f"E{r}"] = item.get("descripcion", "Gasto")
+                    ws[f"F{r}"] = float(item.get("monto", 0))
+                    ws[f"G{r}"] = item.get("metodo_pago", "Efectivo")
+
+            wb.save(EXCEL_PATH)
+            wb.close()
+
+            return True, f"Sincronizados {len(expenses)} registros desde Google Sheets", monto_inicial, total_gastos, saldo_disponible, expenses
+    except Exception as e:
+        return False, f"Error al sincronizar con Google Sheets: {str(e)}", None, None, None, []
+
+    return False, "No se pudo sincronizar", None, None, None, []
+
+def get_excel_summary():
+    # Intentar obtener primero desde Google Sheets si está vinculado
+    success, msg, mi, tg, sd, _ = sync_from_google_sheets()
+    if success and mi is not None:
+        return {"monto_inicial": mi, "total_gastos": tg, "saldo_disponible": sd}
 
     asegurar_excel_existente()
     wb = openpyxl.load_workbook(EXCEL_PATH, data_only=True)
     ws = wb["Control de Gastos"]
-    
     monto_inicial = ws["B6"].value or 0
     total_gastos = ws["C6"].value or 0
     saldo_disponible = ws["D6"].value or (monto_inicial - total_gastos)
-    
     wb.close()
-    return {
-        "monto_inicial": float(monto_inicial),
-        "total_gastos": float(total_gastos),
-        "saldo_disponible": float(saldo_disponible)
-    }
+    return {"monto_inicial": float(monto_inicial), "total_gastos": float(total_gastos), "saldo_disponible": float(saldo_disponible)}
 
 def get_registered_expenses():
-    google_url = get_google_webhook_url()
-    if google_url:
-        try:
-            res = requests.get(google_url, timeout=4)
-            if res.status_code == 200:
-                data = res.json()
-                if "expenses" in data and isinstance(data["expenses"], list):
-                    return data["expenses"]
-        except Exception:
-            pass
+    success, msg, mi, tg, sd, expenses = sync_from_google_sheets()
+    if success and expenses is not None:
+        return expenses
 
     asegurar_excel_existente()
     wb = openpyxl.load_workbook(EXCEL_PATH, data_only=True)
     ws = wb["Control de Gastos"]
-    
     expenses_list = []
     for r in range(11, 60):
         monto = ws[f"F{r}"].value
@@ -318,6 +342,7 @@ def get_registered_expenses():
     return expenses_list
 
 def add_expense_to_excel(fecha, categoria, descripcion, monto, metodo_pago):
+    # 1. Guardar en local Excel
     asegurar_excel_existente()
     wb = openpyxl.load_workbook(EXCEL_PATH)
     ws = wb["Control de Gastos"]
@@ -342,6 +367,7 @@ def add_expense_to_excel(fecha, categoria, descripcion, monto, metodo_pago):
     wb.save(EXCEL_PATH)
     wb.close()
 
+    # 2. Sincronizar inmediatamente enviando a Google Sheets
     google_url = get_google_webhook_url()
     if google_url:
         try:
@@ -363,12 +389,10 @@ def delete_expense_from_excel(row_index, monto, descripcion):
     wb = openpyxl.load_workbook(EXCEL_PATH)
     ws = wb["Control de Gastos"]
     
-    # Encontrar la fila a eliminar
     deleted = False
     target = int(row_index) if row_index and str(row_index).isdigit() else None
     
     if target and target >= 11 and target < 60:
-        # Limpiar celdas de esa fila
         ws[f"C{target}"] = None
         ws[f"D{target}"] = None
         ws[f"E{target}"] = None
@@ -376,7 +400,6 @@ def delete_expense_from_excel(row_index, monto, descripcion):
         ws[f"G{target}"] = None
         deleted = True
     else:
-        # Buscar por monto y descripcion
         for r in range(11, 60):
             m = ws[f"F{r}"].value
             d = ws[f"E{r}"].value
@@ -393,6 +416,7 @@ def delete_expense_from_excel(row_index, monto, descripcion):
     wb.save(EXCEL_PATH)
     wb.close()
 
+    # Sincronizar eliminación con Google Sheets
     google_url = get_google_webhook_url()
     if google_url:
         try:
@@ -455,7 +479,7 @@ HTML_TEMPLATE = """
         <h1 class="text-lg font-bold text-white flex items-center gap-1.5">
           <span>🎙️</span> Control de Gastos 24/7
         </h1>
-        <p id="syncStatus" class="text-[10px] text-indigo-200">🟢 Conexión Lista</p>
+        <p id="syncStatus" class="text-[10px] text-indigo-200">🟢 Sincronización Bidireccional</p>
       </div>
       <a href="/download" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg border border-emerald-400 shadow flex items-center gap-1 transition-all">
         📥 Excel (.xlsx)
@@ -470,7 +494,7 @@ HTML_TEMPLATE = """
           <span class="group-open:rotate-180 transition-transform">▼</span>
         </summary>
         <div class="mt-2 space-y-2 text-xs">
-          <p class="text-[10px] text-slate-400">Pega aquí la URL de tu Google Apps Script de tu Google Sheet para ver y modificar tus datos en tiempo real:</p>
+          <p class="text-[10px] text-slate-400">Pega aquí la URL de tu Apps Script de Google Sheets para sincronización bidireccional en tiempo real:</p>
           <div class="flex gap-1">
             <input type="text" id="googleUrlInput" class="flex-1 text-[11px] bg-slate-800 border border-slate-700 rounded px-2 py-1 text-slate-200 focus:outline-none" placeholder="https://script.google.com/macros/s/.../exec">
             <button onclick="saveGoogleUrl()" class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-2 py-1 rounded text-xs">Vincular</button>
@@ -564,12 +588,12 @@ HTML_TEMPLATE = """
         </div>
       </div>
 
-      <!-- TABLA DE HISTORIAL DE GASTOS CON BOTÓN ELIMINAR -->
+      <!-- TABLA DE HISTORIAL DE GASTOS CON BOTÓN DE SINCRONIZACIÓN BIDIRECCIONAL -->
       <div class="pt-2">
         <div class="flex items-center justify-between mb-2">
-          <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300">📋 Gastos Registrados (Sincronizado)</h3>
-          <button onclick="loadData()" class="text-[10px] text-indigo-400 hover:underline flex items-center gap-0.5">
-            🔄 Sincronizar
+          <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300">📋 Gastos en Google Sheets</h3>
+          <button onclick="triggerSync()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-bold px-2.5 py-1 rounded-lg flex items-center gap-1 transition-all shadow">
+            🔄 Sincronizar en Vivo
           </button>
         </div>
         <div class="overflow-x-auto max-h-48 border border-slate-700 rounded-lg">
@@ -665,6 +689,18 @@ HTML_TEMPLATE = """
 
     function fmt(n) { return '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}); }
 
+    async function triggerSync() {
+      showToast('🔄 Sincronizando bidireccionalmente con Google Sheets...', 'info');
+      const resp = await fetch('/api/sync_google');
+      const data = await resp.json();
+      if (data.success) {
+        showToast('🟢 ' + data.message, 'success');
+      } else {
+        showToast('ℹ️ ' + data.message, 'info');
+      }
+      loadData();
+    }
+
     async function loadData() {
       const respKpi = await fetch('/api/summary');
       const dataKpi = await respKpi.json();
@@ -686,7 +722,7 @@ HTML_TEMPLATE = """
       tbody.innerHTML = '';
 
       if (!expenses || expenses.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="px-2 py-2 text-center text-slate-500">No hay gastos registrados aún.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" class="px-2 py-2 text-center text-slate-500">No hay gastos registrados aún en la hoja.</td></tr>';
         return;
       }
 
@@ -699,7 +735,7 @@ HTML_TEMPLATE = """
           <td class="px-2 py-1.5 text-slate-400 whitespace-normal break-words max-w-[120px]">${item.descripcion}</td>
           <td class="px-2 py-1.5 text-right text-rose-400 font-bold">${fmt(item.monto)}</td>
           <td class="px-1 py-1.5 text-center">
-            <button onclick="deleteExpense(${item.row_index || item.rowIndex || (idx + 11)}, ${item.monto}, '${item.descripcion.replace(/'/g, "\\'")}')" class="bg-rose-900/60 hover:bg-rose-600 text-rose-200 hover:text-white px-2 py-0.5 rounded font-bold text-[10px] transition-colors" title="Eliminar registro">
+            <button onclick="deleteExpense(${item.row_index || item.rowIndex || (idx + 11)}, ${item.monto}, '${item.descripcion.replace(/'/g, "\\'")}')" class="bg-rose-900/60 hover:bg-rose-600 text-rose-200 hover:text-white px-2 py-0.5 rounded font-bold text-[10px] transition-colors" title="Eliminar registro de Google Sheets">
               🗑️
             </button>
           </td>
@@ -709,7 +745,7 @@ HTML_TEMPLATE = """
     }
 
     async function deleteExpense(rowIndex, monto, descripcion) {
-      if (!confirm(`¿Deseas eliminar este gasto de ${fmt(monto)}?`)) return;
+      if (!confirm(`¿Deseas eliminar este gasto de ${fmt(monto)}? Se borrará de Google Sheets y de la app.`)) return;
 
       const resp = await fetch('/api/delete_expense', {
         method: 'POST',
@@ -718,7 +754,7 @@ HTML_TEMPLATE = """
       });
       const data = await resp.json();
       if (data.success) {
-        showToast('🗑️ Registro eliminado correctamente', 'success');
+        showToast('🗑️ Registro eliminado de Google Sheets y App', 'success');
         loadData();
       } else {
         showToast('❌ No se pudo eliminar el registro', 'error');
@@ -736,7 +772,7 @@ HTML_TEMPLATE = """
       if (data.success) {
         showToast('🟢 Google Sheets vinculado con éxito', 'success');
         document.getElementById('syncStatus').textContent = '🟢 Google Sheets Vinculado';
-        loadData();
+        triggerSync();
       }
     }
 
@@ -778,7 +814,7 @@ HTML_TEMPLATE = """
       
       const data = await resp.json();
       if (data.success) {
-        showToast('🎉 ' + data.message, 'success');
+        showToast('🎉 Gasto enviado a Google Sheets y App', 'success');
         document.getElementById('rawText').value = '';
         document.getElementById('valMonto').value = '';
         document.getElementById('valDesc').value = '';
@@ -795,7 +831,7 @@ HTML_TEMPLATE = """
         toast.classList.add('bg-emerald-900', 'text-emerald-200');
       } else if (type === 'error') {
         toast.classList.add('bg-rose-900', 'text-rose-200');
-      } else {
+      } else if (type === 'info') {
         toast.classList.add('bg-blue-900', 'text-blue-200');
       }
       toast.textContent = msg;
@@ -819,6 +855,11 @@ def summary():
 @app.route("/api/expenses", methods=["GET"])
 def expenses():
     return jsonify(get_registered_expenses())
+
+@app.route("/api/sync_google", methods=["GET"])
+def sync_google():
+    success, msg, mi, tg, sd, exp = sync_from_google_sheets()
+    return jsonify({"success": success, "message": msg, "total_synced": len(exp) if exp else 0})
 
 @app.route("/api/parse_voice", methods=["POST"])
 def parse_voice():
