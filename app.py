@@ -1,7 +1,7 @@
 import os
 import re
 from datetime import datetime
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request, jsonify, send_file
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -252,6 +252,27 @@ def get_excel_summary():
         "saldo_disponible": float(saldo_disponible)
     }
 
+def get_registered_expenses():
+    asegurar_excel_existente()
+    wb = openpyxl.load_workbook(EXCEL_PATH, data_only=True)
+    ws = wb["Control de Gastos"]
+    
+    expenses_list = []
+    for r in range(11, 46):
+        monto = ws[f"F{r}"].value
+        if monto is not None and monto != "":
+            expenses_list.append({
+                "num": ws[f"B{r}"].value,
+                "fecha": str(ws[f"C{r}"].value or ""),
+                "categoria": ws[f"D{r}"].value or "Otros",
+                "descripcion": ws[f"E{r}"].value or "Gasto",
+                "monto": float(monto),
+                "metodo_pago": ws[f"G{r}"].value or "Efectivo",
+                "saldo_restante": float(ws[f"H{r}"].value or 0) if ws[f"H{r}"].value not in [None, ""] else None
+            })
+    wb.close()
+    return expenses_list
+
 def add_expense_to_excel(fecha, categoria, descripcion, monto, metodo_pago):
     asegurar_excel_existente()
     wb = openpyxl.load_workbook(EXCEL_PATH)
@@ -276,7 +297,7 @@ def add_expense_to_excel(fecha, categoria, descripcion, monto, metodo_pago):
 
     wb.save(EXCEL_PATH)
     wb.close()
-    return True, f"Gasto de ${monto:.2f} registrado en fila {target_row}."
+    return True, f"Gasto de ${monto:.2f} registrado con éxito."
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -299,13 +320,18 @@ HTML_TEMPLATE = """
 </head>
 <body class="bg-slate-900 text-slate-100 font-sans antialiased min-h-screen p-4 flex flex-col items-center">
 
-  <div class="w-full max-w-md bg-slate-800 rounded-2xl border border-slate-700 shadow-xl overflow-hidden flex flex-col">
+  <div class="w-full max-w-md bg-slate-800 rounded-2xl border border-slate-700 shadow-xl overflow-hidden flex flex-col my-auto">
     
-    <div class="bg-indigo-700 p-4 text-center relative">
-      <h1 class="text-xl font-bold text-white flex items-center justify-center gap-2">
-        <span>🎙️</span> Control de Gastos 24/7
-      </h1>
-      <p class="text-xs text-indigo-200 mt-1">Servidor HTTPS en la Nube (Render)</p>
+    <div class="bg-indigo-700 p-4 text-center relative flex items-center justify-between">
+      <div class="text-left">
+        <h1 class="text-lg font-bold text-white flex items-center gap-1.5">
+          <span>🎙️</span> Control de Gastos 24/7
+        </h1>
+        <p class="text-[10px] text-indigo-200">Servidor en Nube HTTPS</p>
+      </div>
+      <a href="/download" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg border border-emerald-400 shadow flex items-center gap-1 transition-all">
+        📥 Excel (.xlsx)
+      </a>
     </div>
 
     <div class="grid grid-cols-3 gap-2 p-4 bg-slate-850 border-b border-slate-700">
@@ -323,65 +349,86 @@ HTML_TEMPLATE = """
       </div>
     </div>
 
-    <div class="p-5 flex flex-col items-center justify-center text-center">
-      <p class="text-xs text-slate-400 mb-3">Toca el botón y di tu gasto:<br><span class="italic text-indigo-300">"Gasté 250 pesos en supermercado"</span></p>
+    <div class="p-4 flex flex-col items-center justify-center text-center">
+      <p class="text-xs text-slate-400 mb-2">Toca el botón y di tu gasto:<br><span class="italic text-indigo-300">"Gasté 250 pesos en supermercado"</span></p>
 
-      <button id="btnVoice" onclick="toggleVoice()" class="w-20 h-20 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center text-3xl shadow-lg transition-all transform active:scale-95">
+      <button id="btnVoice" onclick="toggleVoice()" class="w-16 h-16 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white flex items-center justify-center text-2xl shadow-lg transition-all transform active:scale-95">
         <span id="micIcon">🎙️</span>
       </button>
 
       <div id="statusText" class="mt-2 text-xs font-semibold text-slate-300">Toca para dictar por voz</div>
     </div>
 
-    <div class="p-4 bg-slate-900/60 border-t border-slate-700 flex-1">
-      <div class="space-y-3">
-        <div>
-          <label class="block text-[11px] text-slate-400 font-semibold mb-1">🗣️ Texto Dictado o Reconocido:</label>
-          <input type="text" id="rawText" class="w-full text-xs bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-indigo-500" placeholder="Escribe o dicta aquí..." oninput="processManualInput()">
-        </div>
-
-        <div class="grid grid-cols-2 gap-2">
-          <div>
-            <label class="block text-[11px] text-slate-400">Monto ($):</label>
-            <input type="number" step="0.01" id="valMonto" class="w-full text-sm font-bold bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-emerald-400 focus:outline-none">
-          </div>
-          <div>
-            <label class="block text-[11px] text-slate-400">Categoría:</label>
-            <select id="valCategoria" class="w-full text-xs bg-slate-800 border border-slate-700 rounded-lg px-2 py-2 text-slate-200 focus:outline-none">
-              <option value="Alimentación">Alimentación</option>
-              <option value="Vivienda / Servicios">Vivienda / Servicios</option>
-              <option value="Transporte">Transporte</option>
-              <option value="Entretenimiento">Entretenimiento</option>
-              <option value="Salud">Salud</option>
-              <option value="Educación">Educación</option>
-              <option value="Ropa y Calzado">Ropa y Calzado</option>
-              <option value="Otros">Otros</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="grid grid-cols-2 gap-2">
-          <div>
-            <label class="block text-[11px] text-slate-400">Descripción:</label>
-            <input type="text" id="valDesc" class="w-full text-xs bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 focus:outline-none">
-          </div>
-          <div>
-            <label class="block text-[11px] text-slate-400">Método Pago:</label>
-            <select id="valMetodo" class="w-full text-xs bg-slate-800 border border-slate-700 rounded-lg px-2 py-2 text-slate-200 focus:outline-none">
-              <option value="Efectivo">Efectivo</option>
-              <option value="Tarjeta de Débito">Tarjeta de Débito</option>
-              <option value="Tarjeta de Crédito">Tarjeta de Crédito</option>
-              <option value="Transferencia">Transferencia</option>
-            </select>
-          </div>
-        </div>
-
-        <button onclick="saveExpense()" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2.5 rounded-xl text-xs shadow transition-colors mt-2">
-          ✅ Guardar Gasto
-        </button>
+    <div class="p-4 bg-slate-900/60 border-t border-slate-700 space-y-3">
+      <div>
+        <label class="block text-[11px] text-slate-400 font-semibold mb-1">🗣️ Texto Dictado o Reconocido:</label>
+        <input type="text" id="rawText" class="w-full text-xs bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 focus:outline-none focus:border-indigo-500" placeholder="Escribe o dicta aquí..." oninput="processManualInput()">
       </div>
 
-      <div id="toast" class="hidden mt-3 p-2.5 rounded-lg text-xs font-semibold text-center"></div>
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <label class="block text-[11px] text-slate-400">Monto ($):</label>
+          <input type="number" step="0.01" id="valMonto" class="w-full text-sm font-bold bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-emerald-400 focus:outline-none">
+        </div>
+        <div>
+          <label class="block text-[11px] text-slate-400">Categoría:</label>
+          <select id="valCategoria" class="w-full text-xs bg-slate-800 border border-slate-700 rounded-lg px-2 py-2 text-slate-200 focus:outline-none">
+            <option value="Alimentación">Alimentación</option>
+            <option value="Vivienda / Servicios">Vivienda / Servicios</option>
+            <option value="Transporte">Transporte</option>
+            <option value="Entretenimiento">Entretenimiento</option>
+            <option value="Salud">Salud</option>
+            <option value="Educación">Educación</option>
+            <option value="Ropa y Calzado">Ropa y Calzado</option>
+            <option value="Otros">Otros</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-2">
+        <div>
+          <label class="block text-[11px] text-slate-400">Descripción:</label>
+          <input type="text" id="valDesc" class="w-full text-xs bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-slate-200 focus:outline-none">
+        </div>
+        <div>
+          <label class="block text-[11px] text-slate-400">Método Pago:</label>
+          <select id="valMetodo" class="w-full text-xs bg-slate-800 border border-slate-700 rounded-lg px-2 py-2 text-slate-200 focus:outline-none">
+            <option value="Efectivo">Efectivo</option>
+            <option value="Tarjeta de Débito">Tarjeta de Débito</option>
+            <option value="Tarjeta de Crédito">Tarjeta de Crédito</option>
+            <option value="Transferencia">Transferencia</option>
+          </select>
+        </div>
+      </div>
+
+      <button onclick="saveExpense()" class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2.5 rounded-xl text-xs shadow transition-colors">
+        ✅ Guardar Gasto
+      </button>
+
+      <!-- TABLA DE HISTORIAL DE GASTOS -->
+      <div class="pt-2">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300">📋 Gastos Registrados en Excel</h3>
+          <a href="/download" class="text-[10px] text-indigo-400 hover:underline">Descargar Archivo</a>
+        </div>
+        <div class="overflow-x-auto max-h-36 border border-slate-700 rounded-lg">
+          <table class="w-full text-xs text-left text-slate-300">
+            <thead class="bg-slate-800 uppercase text-[9px] text-slate-400 sticky top-0">
+              <tr>
+                <th class="px-2 py-1">Fecha</th>
+                <th class="px-2 py-1">Cat.</th>
+                <th class="px-2 py-1">Concepto</th>
+                <th class="px-2 py-1 text-right">Monto</th>
+              </tr>
+            </thead>
+            <tbody id="historyBody" class="divide-y divide-slate-700/50">
+              <tr><td colspan="4" class="px-2 py-2 text-center text-slate-500">Cargando gastos...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="toast" class="hidden p-2.5 rounded-lg text-xs font-semibold text-center"></div>
     </div>
 
   </div>
@@ -454,12 +501,38 @@ HTML_TEMPLATE = """
       if (text.length > 2) parseSpeechText(text);
     }
 
-    async function fetchKPIs() {
-      const resp = await fetch('/api/summary');
-      const data = await resp.json();
-      document.getElementById('kpiInicial').textContent = '$' + data.monto_inicial.toFixed(2);
-      document.getElementById('kpiGastos').textContent = '$' + data.total_gastos.toFixed(2);
-      document.getElementById('kpiDisponible').textContent = '$' + data.saldo_disponible.toFixed(2);
+    function fmt(n) { return '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}); }
+
+    async function loadData() {
+      // KPIs
+      const respKpi = await fetch('/api/summary');
+      const dataKpi = await respKpi.json();
+      document.getElementById('kpiInicial').textContent = fmt(dataKpi.monto_inicial);
+      document.getElementById('kpiGastos').textContent = fmt(dataKpi.total_gastos);
+      document.getElementById('kpiDisponible').textContent = fmt(dataKpi.saldo_disponible);
+
+      // Tabla Historial
+      const respHistory = await fetch('/api/expenses');
+      const expenses = await respHistory.json();
+      const tbody = document.getElementById('historyBody');
+      tbody.innerHTML = '';
+
+      if (expenses.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" class="px-2 py-2 text-center text-slate-500">No hay gastos registrados aún.</td></tr>';
+        return;
+      }
+
+      expenses.forEach((item) => {
+        const tr = document.createElement('tr');
+        tr.className = 'border-b border-slate-700/40';
+        tr.innerHTML = `
+          <td class="px-2 py-1.5 text-[10px] text-slate-400">${item.fecha}</td>
+          <td class="px-2 py-1.5 text-slate-200 font-medium">${item.categoria}</td>
+          <td class="px-2 py-1.5 text-slate-400">${item.descripcion}</td>
+          <td class="px-2 py-1.5 text-right text-rose-400 font-bold">${fmt(item.monto)}</td>
+        `;
+        tbody.appendChild(tr);
+      });
     }
 
     async function saveExpense() {
@@ -486,7 +559,7 @@ HTML_TEMPLATE = """
         document.getElementById('rawText').value = '';
         document.getElementById('valMonto').value = '';
         document.getElementById('valDesc').value = '';
-        fetchKPIs();
+        loadData();
       } else {
         showToast('❌ ' + data.message, 'error');
       }
@@ -506,7 +579,7 @@ HTML_TEMPLATE = """
       setTimeout(() => { toast.classList.add('hidden'); }, 4000);
     }
 
-    fetchKPIs();
+    loadData();
   </script>
 </body>
 </html>
@@ -519,6 +592,10 @@ def index():
 @app.route("/api/summary", methods=["GET"])
 def summary():
     return jsonify(get_excel_summary())
+
+@app.route("/api/expenses", methods=["GET"])
+def expenses():
+    return jsonify(get_registered_expenses())
 
 @app.route("/api/parse_voice", methods=["POST"])
 def parse_voice():
@@ -537,6 +614,11 @@ def add_expense():
     
     success, msg = add_expense_to_excel(fecha, categoria, descripcion, monto, metodo_pago)
     return jsonify({"success": success, "message": msg})
+
+@app.route("/download")
+def download():
+    asegurar_excel_existente()
+    return send_file(EXCEL_PATH, as_attachment=True, download_name="Control_de_Gastos_Actualizado.xlsx")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
