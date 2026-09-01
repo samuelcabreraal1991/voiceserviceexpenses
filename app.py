@@ -259,22 +259,27 @@ def sync_from_google_sheets():
     if not google_url:
         return False, "No hay Google Sheets vinculado.", None, None, None, []
 
+    if not google_url.startswith("https://script.google.com"):
+        return False, "La URL vinculada debe empezar por 'https://script.google.com/macros/s/.../exec'", None, None, None, []
+
     try:
-        res = requests.get(google_url, timeout=5)
+        res = requests.get(google_url, allow_redirects=True, timeout=6)
         if res.status_code == 200:
-            data = res.json()
+            try:
+                data = res.json()
+            except Exception:
+                return False, "Google devolvió una página de acceso o error HTML. Asegúrate de publicar el Apps Script con Acceso: 'Cualquier persona' (Anyone) y desplegar una NUEVA VERSIÓN.", None, None, None, []
+
             monto_inicial = float(data.get("monto_inicial", 5000))
             total_gastos = float(data.get("total_gastos", 0))
             saldo_disponible = float(data.get("saldo_disponible", monto_inicial - total_gastos))
             expenses = data.get("expenses", [])
 
-            # Sincronizar archivo Excel local con la data real traída de Google Sheets
             asegurar_excel_existente()
             wb = openpyxl.load_workbook(EXCEL_PATH)
             ws = wb["Control de Gastos"]
             ws["B6"] = monto_inicial
 
-            # Limpiar filas anteriores
             for r in range(11, 60):
                 ws[f"C{r}"] = None
                 ws[f"D{r}"] = None
@@ -282,7 +287,6 @@ def sync_from_google_sheets():
                 ws[f"F{r}"] = None
                 ws[f"G{r}"] = None
 
-            # Re-poblar filas traídas de Google Sheets
             for idx, item in enumerate(expenses):
                 r = 11 + idx
                 if r < 60:
@@ -298,12 +302,11 @@ def sync_from_google_sheets():
 
             return True, f"Sincronizados {len(expenses)} registros desde Google Sheets", monto_inicial, total_gastos, saldo_disponible, expenses
     except Exception as e:
-        return False, f"Error al sincronizar con Google Sheets: {str(e)}", None, None, None, []
+        return False, f"Error de conexión con Google Sheets: {str(e)}", None, None, None, []
 
     return False, "No se pudo sincronizar", None, None, None, []
 
 def get_excel_summary():
-    # Intentar obtener primero desde Google Sheets si está vinculado
     success, msg, mi, tg, sd, _ = sync_from_google_sheets()
     if success and mi is not None:
         return {"monto_inicial": mi, "total_gastos": tg, "saldo_disponible": sd}
@@ -342,7 +345,6 @@ def get_registered_expenses():
     return expenses_list
 
 def add_expense_to_excel(fecha, categoria, descripcion, monto, metodo_pago):
-    # 1. Guardar en local Excel
     asegurar_excel_existente()
     wb = openpyxl.load_workbook(EXCEL_PATH)
     ws = wb["Control de Gastos"]
@@ -367,7 +369,6 @@ def add_expense_to_excel(fecha, categoria, descripcion, monto, metodo_pago):
     wb.save(EXCEL_PATH)
     wb.close()
 
-    # 2. Sincronizar inmediatamente enviando a Google Sheets
     google_url = get_google_webhook_url()
     if google_url:
         try:
@@ -378,7 +379,7 @@ def add_expense_to_excel(fecha, categoria, descripcion, monto, metodo_pago):
                 "descripcion": descripcion,
                 "monto": float(monto),
                 "metodo_pago": metodo_pago
-            }, timeout=4)
+            }, timeout=5)
         except Exception:
             pass
 
@@ -416,7 +417,6 @@ def delete_expense_from_excel(row_index, monto, descripcion):
     wb.save(EXCEL_PATH)
     wb.close()
 
-    # Sincronizar eliminación con Google Sheets
     google_url = get_google_webhook_url()
     if google_url:
         try:
@@ -425,7 +425,7 @@ def delete_expense_from_excel(row_index, monto, descripcion):
                 "row_index": target,
                 "monto": float(monto),
                 "descripcion": descripcion
-            }, timeout=4)
+            }, timeout=5)
         except Exception:
             pass
 
@@ -445,7 +445,7 @@ def update_initial_budget(nuevo_monto):
             requests.post(google_url, json={
                 "action": "update_budget",
                 "monto_inicial": float(nuevo_monto)
-            }, timeout=4)
+            }, timeout=5)
         except Exception:
             pass
 
@@ -588,7 +588,7 @@ HTML_TEMPLATE = """
         </div>
       </div>
 
-      <!-- TABLA DE HISTORIAL DE GASTOS CON BOTÓN DE SINCRONIZACIÓN BIDIRECCIONAL -->
+      <!-- TABLA DE HISTORIAL DE GASTOS -->
       <div class="pt-2">
         <div class="flex items-center justify-between mb-2">
           <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300">📋 Gastos en Google Sheets</h3>
@@ -655,7 +655,6 @@ HTML_TEMPLATE = """
     function resetMicUI() {
       isListening = false;
       document.getElementById('btnVoice').classList.remove('bg-rose-600', 'pulse-ring');
-      document.getElementById('btnVoice').classList.add('bg-indigo-600');
       document.getElementById('micIcon').textContent = '🎙️';
       document.getElementById('statusText').textContent = 'Toca para dictar por voz';
     }
@@ -690,13 +689,13 @@ HTML_TEMPLATE = """
     function fmt(n) { return '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}); }
 
     async function triggerSync() {
-      showToast('🔄 Sincronizando bidireccionalmente con Google Sheets...', 'info');
+      showToast('🔄 Sincronizando con Google Sheets...', 'info');
       const resp = await fetch('/api/sync_google');
       const data = await resp.json();
       if (data.success) {
         showToast('🟢 ' + data.message, 'success');
       } else {
-        showToast('ℹ️ ' + data.message, 'info');
+        showToast('⚠️ ' + data.message, 'error');
       }
       loadData();
     }
@@ -735,7 +734,7 @@ HTML_TEMPLATE = """
           <td class="px-2 py-1.5 text-slate-400 whitespace-normal break-words max-w-[120px]">${item.descripcion}</td>
           <td class="px-2 py-1.5 text-right text-rose-400 font-bold">${fmt(item.monto)}</td>
           <td class="px-1 py-1.5 text-center">
-            <button onclick="deleteExpense(${item.row_index || item.rowIndex || (idx + 11)}, ${item.monto}, '${item.descripcion.replace(/'/g, "\\'")}')" class="bg-rose-900/60 hover:bg-rose-600 text-rose-200 hover:text-white px-2 py-0.5 rounded font-bold text-[10px] transition-colors" title="Eliminar registro de Google Sheets">
+            <button onclick="deleteExpense(${item.row_index || item.rowIndex || (idx + 11)}, ${item.monto}, '${(item.descripcion || '').replace(/'/g, "\\'")}')" class="bg-rose-900/60 hover:bg-rose-600 text-rose-200 hover:text-white px-2 py-0.5 rounded font-bold text-[10px] transition-colors" title="Eliminar registro">
               🗑️
             </button>
           </td>
@@ -745,7 +744,7 @@ HTML_TEMPLATE = """
     }
 
     async function deleteExpense(rowIndex, monto, descripcion) {
-      if (!confirm(`¿Deseas eliminar este gasto de ${fmt(monto)}? Se borrará de Google Sheets y de la app.`)) return;
+      if (!confirm(`¿Deseas eliminar este gasto de ${fmt(monto)}?`)) return;
 
       const resp = await fetch('/api/delete_expense', {
         method: 'POST',
@@ -754,7 +753,7 @@ HTML_TEMPLATE = """
       });
       const data = await resp.json();
       if (data.success) {
-        showToast('🗑️ Registro eliminado de Google Sheets y App', 'success');
+        showToast('🗑️ Registro eliminado correctamente', 'success');
         loadData();
       } else {
         showToast('❌ No se pudo eliminar el registro', 'error');
@@ -814,7 +813,7 @@ HTML_TEMPLATE = """
       
       const data = await resp.json();
       if (data.success) {
-        showToast('🎉 Gasto enviado a Google Sheets y App', 'success');
+        showToast('🎉 Gasto guardado correctamente', 'success');
         document.getElementById('rawText').value = '';
         document.getElementById('valMonto').value = '';
         document.getElementById('valDesc').value = '';
@@ -835,7 +834,7 @@ HTML_TEMPLATE = """
         toast.classList.add('bg-blue-900', 'text-blue-200');
       }
       toast.textContent = msg;
-      setTimeout(() => { toast.classList.add('hidden'); }, 4000);
+      setTimeout(() => { toast.classList.add('hidden'); }, 5000);
     }
 
     loadData();
